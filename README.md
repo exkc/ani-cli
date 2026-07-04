@@ -1,4 +1,7 @@
 # djs38943 from openlgtv dicord made it. i am just putting it on gh
+Also u would need a compiled version of fzf and bash to run it
+This script muight help you on compiling those
+https://raw.githubusercontent.com/webosbrew/webos-homebrew-channel/refs/heads/main/tools/build-binaries.sh
 
 <p align=center>
 <br>
