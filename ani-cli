@@ -1,6 +1,6 @@
 #!/bin/sh
 
-version_number="4.14.1"
+version_number="4.14.1-webos"
 
 # UI
 
@@ -56,14 +56,10 @@ help_info() {
         Delete history
       -l, --logview
         Show logs
-      -s, --syncplay
-        Use Syncplay to watch with friends
       -S, --select-nth
         Select nth entry
       -q, --quality
         Specify the video quality
-      -v, --vlc
-        Use VLC to play the video
       -V, --version
         Show the version of the script
       -h, --help
@@ -76,26 +72,17 @@ help_info() {
         Use rofi instead of fzf for the interactive menu
       --dmenu
         Use dmenu instead of fzf for the interactive menu
-      --skip
-        Use ani-skip to skip the intro of the episode (mpv only)
-      --no-detach
-        Don't detach the player (useful for in-terminal playback, mpv only)
-      --exit-after-play
-        Exit the player, and return the player exit code (useful for non interactive scenarios, mpv only)
-      --skip-title <title>
-        Use given title as ani-skip query
       -N, --nextep-countdown
         Display a countdown to the next episode
       -U, --update
         Update the script
     Some example usages:
       %s -q 720p banana fish
-      %s --skip --skip-title \"one piece\" -S 2 one piece
+      %s -S 2 one piece
       %s -d -e 2 cyberpunk edgerunners
-      %s --vlc cyberpunk edgerunners -q 1080p -e 4
       %s blue lock -e 5-6
       %s -e \"5 6\" blue lock
-    \n" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}"
+    \n" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}"
     exit 0
 }
 
@@ -128,20 +115,41 @@ dep_ch() {
     done
 }
 
-where_iina() {
-    [ -e "/Applications/IINA.app/Contents/MacOS/iina-cli" ] && echo "/Applications/IINA.app/Contents/MacOS/iina-cli" && return 0
-    printf "%s" "iina" && return 0
-}
-
-where_mpv() {
-    command -v "flatpak" >/dev/null && flatpak info io.mpv.Mpv >/dev/null 2>&1 && printf "%s" "flatpak_mpv" && return 0
-    printf "%s" "mpv" && return 0
-}
-
 cleanup() {
-    [ "$player_function" = "android_mpv" ] && : >"/storage/emulated/0/mpv/mpv.config.mp4"
-    printf "\033[0m"        # clears colors
+    luna_webos_close
+    printf "\033[0m" # clears colors
     rm -f "${histfile}.new" # remove temp logfile
+}
+
+# PLAYER (webOS luna-send-pub)
+
+# JSON-escape a string: backslash, double-quote, and strip control chars
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Launches a URL in the built-in webOS "Media Discovery" player via luna-send-pub.
+# $1 = playable URL   $2 = display/file title
+luna_webos() {
+    _url="$(json_escape "$1")"
+    _title="$(json_escape "$2")"
+    # mimeType is a best-effort guess; webOS's DLNA-style renderer mostly ignores
+    # it for playback decisions but some builds use it for UI display.
+    case "$1" in
+        *.m3u8*) _mime="application/vnd.apple.mpegurl" ;;
+        *.mkv*) _mime="video/x-matroska" ;;
+        *) _mime="video/mp4" ;;
+    esac
+    luna-send-pub -n 1 -f luna://com.webos.applicationManager/launch \
+        '{"id":"com.webos.app.mediadiscovery","params":{"payload":[{"fullPath":"'"$_url"'","artist":"","subtitle":"","dlnaInfo":{"flagVal":4096,"cleartextSize":"-1","contentLength":"-1","opVal":1,"protocolInfo":"http-get:*:'"$_mime"':DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000","duration":0},"mediaType":"VIDEO","thumbnail":"","deviceType":"DMR","album":"","fileName":"'"$_title"'","lastPlayPosition":-1}]}}' \
+        >/dev/null 2>&1 &
+}
+
+# Closes the media player app (called on quit/Ctrl-C via cleanup()).
+luna_webos_close() {
+    luna-send -n 1 -f luna://com.webos.service.applicationmanager/closeByAppId \
+        '{"id":"com.webos.app.mediadiscovery"}' \
+        >/dev/null 2>&1
 }
 
 # SCRAPING
@@ -207,28 +215,17 @@ generate_link() {
 }
 
 select_quality() {
-    # removing urls which have referrer to avoid playing on iSH and vlc (m3u8 streams don't get correct referrer)
-    printf '%s' "$player_function" | cut -f1 -d" " | grep -qE '(android_vlc|iSH|vlc)' && links=$(printf '%s' "$links" | sed '/m3u8_refr >/d')
-    printf '%s' "$player_function" | cut -f1 -d" " | grep -qE '(android_vlc|iSH)' && links=$(printf '%s' "$links" | sed '/Yt >/d')
+    # luna_webos has no way to pass an HTTP Referer header, so drop sources
+    # that require one (wixmp/m3u8 mirrors and the Yt embed) the same way the
+    # original script did for referrer-less players like android_vlc/iSH.
+    printf '%s' "$player_function" | cut -f1 -d" " | grep -qE '(luna_webos)' && links=$(printf '%s' "$links" | sed '/m3u8_refr >/d')
+    printf '%s' "$player_function" | cut -f1 -d" " | grep -qE '(luna_webos)' && links=$(printf '%s' "$links" | sed '/Yt >/d')
     case "$1" in
         best) result=$(printf "%s" "$links" | head -n1) ;;
         worst) result=$(printf "%s" "$links" | grep -E '^[0-9]{3,4}' | tail -n1) ;;
         *) result=$(printf "%s" "$links" | grep -m 1 "$1") ;;
     esac
     [ -z "$result" ] && printf "Specified quality not found, defaulting to best\n" 1>&2 && result=$(printf "%s" "$links" | head -n1)
-
-    # add refr for m3u8 and refr flag for yt
-    case "$result" in
-        *mp4upload*)
-            refr_flag="--referrer=https://www.mp4upload.com"
-            ;;
-        *sharepoint*)
-            unset refr_flag
-            ;;
-        *)
-            refr_flag="--referrer=$allanime_refr"
-            ;;
-    esac
 
     episode=$(printf "%s" "$result" | cut -d'>' -f2)
 }
@@ -392,57 +389,16 @@ download() {
     esac
 }
 
-android_mpv() {
-    dir="/storage/emulated/0/mpv"
-    file="$dir/mpv.config.mp4"
-    if [ -w "${dir%*/mpv}" ]; then
-        [ -d "${dir}" ] || mkdir "${dir}"
-        printf "%s" "$3" | sed 's| --|\n|g; s|^--||g' >"$file"
-    fi
-    am start --user 0 -a android.intent.action.VIEW -d "$1" -n is.xyz.mpv/.MPVActivity -e "title" "$2" >/dev/null 2>&1
-    unset dir file
-}
-
 play_episode() {
     [ "$log_episode" = 1 ] && [ "$player_function" != "debug" ] && [ "$player_function" != "download" ] && command -v logger >/dev/null && logger -t ani-cli "${allanime_title}${ep_no}"
-    [ "$skip_intro" = 1 ] && skip_flag="$(ani-skip -q "$mal_id" -e "$ep_no")"
     [ -z "$episode" ] && get_episode_url
-    # shellcheck disable=SC2086
     case "$player_function" in
         debug)
             printf "All links:\n%s\nSelected link:\n" "$links"
             printf "%s\n" "$episode"
             ;;
-        mpv*)
-            if [ "$no_detach" = 0 ]; then
-                nohup $player_function $skip_flag --tls-verify=no --force-media-title="${allanime_title}Episode ${ep_no}" "$episode" $refr_flag >/dev/null 2>&1 &
-            else
-                $player_function $skip_flag $refr_flag --tls-verify=no --force-media-title="${allanime_title}Episode ${ep_no}" "$episode"
-                mpv_exitcode=$?
-                [ "$exit_after_play" = 1 ] && [ -z "$range" ] && exit "$mpv_exitcode"
-            fi
-            ;;
-        android_mpv) "$player_function" "$episode" "${allanime_title}Episode ${ep_no}" "--tls-verify=no $refr_flag" 2>&1 & ;;
-        android_vlc) nohup am start --user 0 -a android.intent.action.VIEW -d "$episode" -n org.videolan.vlc/org.videolan.vlc.gui.video.VideoPlayerActivity -e "title" "${allanime_title}Episode ${ep_no}" >/dev/null 2>&1 & ;;
-        *iina*)
-            [ -n "$refr_flag" ] && refr_flag="--mpv-${refr_flag#--}"
-            if pgrep -f "IINA" >/dev/null 2>&1; then
-                # omit --keep-running when an IINA instance exists to prevent hanging
-                nohup $player_function --no-stdin --mpv-tls-verify=no --mpv-force-media-title="${allanime_title}Episode ${ep_no}" $refr_flag "$episode" >/dev/null 2>&1 &
-            else
-                nohup $player_function --no-stdin --mpv-tls-verify=no --keep-running --mpv-force-media-title="${allanime_title}Episode ${ep_no}" $refr_flag "$episode" >/dev/null 2>&1 &
-            fi
-            ;;
-        flatpak_mpv) flatpak run io.mpv.Mpv --tls-verify=no --force-media-title="${allanime_title}Episode ${ep_no}" "$episode" $refr_flag >/dev/null 2>&1 & ;;
-        vlc*) nohup $player_function --http-referrer="${refr_flag#--referrer=}" --play-and-exit --meta-title="${allanime_title}Episode ${ep_no}" "$episode" >/dev/null 2>&1 & ;;
-        *yncpla*) nohup $player_function "$episode" -- --tls-verify=no --force-media-title="${allanime_title}Episode ${ep_no}" $refr_flag >/dev/null 2>&1 & ;;
         download) "$player_function" "$episode" "${allanime_title}Episode ${ep_no}" ;;
-        catt) nohup catt cast "$episode" >/dev/null 2>&1 & ;;
-        iSH)
-            printf "\e]8;;vlc://%s\a~~~~~~~~~~~~~~~~~~~~\n~ Tap to open VLC ~\n~~~~~~~~~~~~~~~~~~~~\e]8;;\a\n" "$episode"
-            sleep 5
-            ;;
-        *) nohup $player_function "$episode" >/dev/null 2>&1 & ;;
+        *) luna_webos "$episode" "${allanime_title}Episode ${ep_no}" ;;
     esac
     replay="$episode"
     unset episode
@@ -489,20 +445,13 @@ mode="${ANI_CLI_MODE:-sub}"
 download_dir="${ANI_CLI_DOWNLOAD_DIR:-.}"
 log_episode="${ANI_CLI_LOG:-1}"
 quality="${ANI_CLI_QUALITY:-best}"
-case "$(uname -a | cut -d " " -f 1,3-)" in
-    *Darwin*) player_function="${ANI_CLI_PLAYER:-$(where_iina)}" ;;   # mac OS
-    *ndroid*) player_function="${ANI_CLI_PLAYER:-android_mpv}" ;;     # Android OS (termux)
-    *MINGW* | *WSL2*) player_function="${ANI_CLI_PLAYER:-mpv.exe}" ;; # Windows OS
-    *ish*) player_function="${ANI_CLI_PLAYER:-iSH}" ;;                # iOS (iSH)
-    *) player_function="${ANI_CLI_PLAYER:-$(where_mpv)}" ;;           # Linux OS
-esac
 
-no_detach="${ANI_CLI_NO_DETACH:-0}"
-exit_after_play="${ANI_CLI_EXIT_AFTER_PLAY:-0}"
+# webOS is the only supported target for this variant; luna_webos is the
+# sole playback path (aside from --download/debug).
+player_function="${ANI_CLI_PLAYER:-luna_webos}"
+
 use_external_menu="${ANI_CLI_EXTERNAL_MENU:-0}"
 external_menu_normal_window="${ANI_CLI_EXTERNAL_MENU_NORMAL_WINDOW:-0}"
-skip_intro="${ANI_CLI_SKIP_INTRO:-0}"
-skip_title="${ANI_CLI_SKIP_TITLE:-}"
 [ -t 0 ] || (command -v dmenu && use_external_menu=2)
 [ -t 0 ] || (command -v rofi && use_external_menu=1)
 hist_dir="${ANI_CLI_HIST_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}"
@@ -514,24 +463,6 @@ branch="${ANI_CLI_BRANCH:-master}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -v | --vlc)
-            case "$(uname -a | cut -d " " -f 1,3-)" in
-                *ndroid*) player_function="android_vlc" ;;
-                MINGW* | *WSL2*) player_function="vlc.exe" ;;
-                *ish*) player_function="iSH" ;;
-                *) player_function="vlc" ;;
-            esac
-            ;;
-        -s | --syncplay)
-            case "$(uname -s)" in
-                Darwin*) player_function="/Applications/Syncplay.app/Contents/MacOS/syncplay" ;;
-                MINGW* | *Msys)
-                    export PATH="$PATH":"/c/Program Files (x86)/Syncplay/"
-                    player_function="syncplay.exe"
-                    ;;
-                *) player_function="syncplay" ;;
-            esac
-            ;;
         -q | --quality)
             [ $# -lt 2 ] && die "missing argument!"
             quality="$2"
@@ -543,17 +474,13 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -c | --continue) search=history ;;
-        -d | --download)
-            [ "$player_function" = "iSH" ] && iSH_DownFix="--async-dns=false"
-            player_function=download
-            ;;
+        -d | --download) player_function=download ;;
         -D | --delete)
             : >"$histfile"
             exit 0
             ;;
         -l | --logview)
             case "$(uname -s)" in
-                Darwin*) log show --predicate 'process == "logger"' ;;
                 Linux*) journalctl -t ani-cli ;;
                 *) die "Logger not implemented for your platform" ;;
             esac
@@ -567,16 +494,8 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --dub) mode="dub" ;;
-        --no-detach) no_detach=1 ;;
-        --exit-after-play) exit_after_play=1 && no_detach=1 ;;
         --rofi) use_external_menu=1 ;;
         --dmenu) use_external_menu=2 ;;
-        --skip) skip_intro=1 ;;
-        --skip-title)
-            [ $# -lt 2 ] && die "missing argument!"
-            skip_title="$2"
-            shift
-            ;;
         -N | --nextep-countdown) search=nextep ;;
         -U | --update)
             branch="${2:-$branch}"
@@ -591,19 +510,12 @@ done
 [ "$external_menu_normal_window" = "1" ] && external_menu_args="-normal-window"
 printf "\33[2K\r\033[1;34mChecking dependencies...\033[0m\n"
 dep_ch "curl" "sed" "grep" || true
-case "$(uname -o 2>/dev/null)" in
-    *ndroid*) command -v openssl >/dev/null || die 'Program "openssl" not found. On Termux, install with: pkg install openssl-tool' ;;
-    *) dep_ch "openssl" || true ;;
-esac
-[ "$skip_intro" = 1 ] && (dep_ch "ani-skip" || true)
+dep_ch "openssl" || true
 dep_ch "fzf" || true
 case "$player_function" in
     debug) ;;
     download) dep_ch "ffmpeg" "aria2c" ;;
-    android*) printf "\33[2K\rChecking of players on Android is disabled.\nANI-CLI recommends Android MPV for full compatibility.\nAdd:\n include='/storage/emulated/0/mpv/mpv.config.mp4'\nto:\n MPV > Settings > Advanced > mpv.conf\nfor full functionality.\nIgnore, If Done.\n" ;;
-    *iSH*) printf "\33[2K\rChecking of players on iOS is disabled\n" ;;
-    flatpak_mpv) true ;; # handled out of band in where_mpv
-    *) dep_ch "$player_function" ;;
+    *) dep_ch "luna-send-pub" "luna-send" ;;
 esac
 
 # idk where to put this, so I put it here...
@@ -649,7 +561,6 @@ case "$search" in
         [ -z "$ep_no" ] && exit 1
         ;;
 esac
-[ "$skip_intro" = 1 ] && mal_id="$(ani-skip -q "${skip_title:-${title}}")"
 
 # moves the cursor up one line and clears that line
 tput cuu1 && tput el
@@ -679,7 +590,7 @@ while cmd=$(printf "next\nreplay\nprevious\nselect\nchange_quality\nquit" | nth 
     play
 done
 
-# ani-cli
+# ani-cli (webOS/luna-send-pub variant)
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -694,4 +605,4 @@ done
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 #
-# Project repository: https://github.com/pystardust/ani-cli
+# Original project: https://github.com/pystardust/ani-cli
