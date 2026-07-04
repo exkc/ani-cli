@@ -1,3 +1,5 @@
+# djs38943 from openlgtv dicord made it. i am just putting it on gh
+
 <p align=center>
 <br>
 <a href="http://makeapullrequest.com"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
